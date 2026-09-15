@@ -14,13 +14,27 @@
 ftrans send --path /path/to/data        # 可重复 --path，多次发送多个文件/目录
 ```
 
-接收端（新机）：
+它会打印一个六位**会话码**，例如：
 
-```bash
-ftrans receive "<ticket>" --output /path/to/target
+```
+=== Session code ===
+    NA6Q00
 ```
 
-接收端会用票据里携带的地址直连发送端；mDNS 只是额外兜底，即使校园网封了组播也能工作。
+接收端（新机）只输这个码：
+
+```bash
+ftrans receive NA6Q00 --output /path/to/target
+```
+
+短码是怎么工作的：发送端在局域网内用 UDP 探测/应答（端口 `53535`）广播「我这儿有一个会话」，
+内容包括六位码的**哈希**、本机 endpoint id 和直连地址；接收端凭码找到发送端后，在**加密的 QUIC
+连接里**用 `ftrans-meta` 协议把码交出去，换回真正的票据。码本身从不明文广播，也不需要任何服务器，
+更不依赖 mDNS/组播（所以校园网封组播也能用）。
+
+- 找不到发送端时：`ftrans receive NA6Q00 --addr 192.168.137.1`（跳过广播，直接探测该地址）。
+- 不带参数运行 `ftrans receive` 会列出当前发现到的发送端（主机名 + 地址），方便确认对端在不在。
+- 跨网络/走 relay 时仍然可以直接粘完整票据：`ftrans receive "<ticket>"`。
 
 常用参数：
 
@@ -29,6 +43,7 @@ ftrans receive "<ticket>" --output /path/to/target
 | `--relay none` | 全局（默认） | 纯局域网，不使用任何外部服务器 |
 | `--relay n0` | 全局 | n0 公网 relay，需要能访问 `*.iroh.link`，仅用于跨网络 |
 | `--relay <URL>` | 全局 | 自建 relay，例如 `http://10.0.0.5:3340` |
+| `--addr <IP>` | receive | 不广播，直接探测指定地址（可重复） |
 | `--parallel N` | receive | 并行下载流数量（默认 8） |
 | `--strip-root` | receive | 不额外创建源目录这一层 |
 | `--no-verify` | receive | 跳过接收后的 BLAKE3 校验 |

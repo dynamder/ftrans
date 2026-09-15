@@ -325,6 +325,112 @@ fn end_to_end_cli() {
     println!("=== CLI test passed ===");
 }
 
+// ── short session code: discovery + ticket exchange ────────────────────────
+
+/// The receiver only knows the six character code: it has to find the sender on
+/// the local network, trade the code for the ticket, and then transfer normally.
+#[tokio::test]
+async fn short_code_finds_sender_and_transfers() {
+    use ftrans::net::RelayChoice;
+    use iroh::{EndpointAddr, TransportAddr};
+    use std::net::{IpAddr, SocketAddr};
+    use std::time::Duration;
+
+    let src_dir = TempDir::new().unwrap();
+    std::fs::write(src_dir.path().join("note.txt"), b"short code transfer\n").unwrap();
+    std::fs::write(src_dir.path().join("blob.bin"), vec![7u8; 64 * 1024]).unwrap();
+
+    let sender_ep = ftrans::net::create_endpoint(&RelayChoice::Lan).await.unwrap();
+    let sender_id = sender_ep.id();
+    let sender_addrs: Vec<SocketAddr> = sender_ep
+        .addr()
+        .ip_addrs()
+        .copied()
+        .collect();
+    assert!(!sender_addrs.is_empty());
+
+    let (store, store_dir) = ftrans::sender::create_store(
+        std::env::temp_dir().as_path(),
+        "ftrans-test-code-send",
+    )
+    .await
+    .unwrap();
+    let (hash, format) = ftrans::sender::import(&[src_dir.path().to_path_buf()], &store)
+        .await
+        .unwrap();
+    let ticket = iroh_blobs::ticket::BlobTicket::new(sender_ep.addr(), hash, format);
+
+    let code = ftrans::session::generate_code();
+    let wrong_code = if code == "000000" { "000001" } else { "000000" }.to_string();
+
+    let meta = ftrans::sender::MetaHandler {
+        code: code.clone(),
+        ticket: ticket.to_string(),
+    };
+    let beacon = ftrans::session::Beacon::new(&code, sender_id, &sender_addrs, "test-host".into());
+    let ips: Vec<IpAddr> = sender_addrs.iter().map(|a| a.ip()).collect();
+    ftrans::session::announce(beacon, ips).await.unwrap();
+
+    let (router, _done_rx) = ftrans::sender::spawn_router(sender_ep, store, Some(meta))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Discovery, restricted to loopback so the test does not depend on the
+    // machine's broadcast behaviour.
+    let found =
+        ftrans::session::discover(&[], &[IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)], Duration::from_secs(2))
+            .await;
+    assert_eq!(found.len(), 1, "expected exactly the one announced sender");
+    assert_eq!(found[0].tag, ftrans::session::code_tag(&code));
+    assert_eq!(found[0].host, "test-host");
+
+    let addr = EndpointAddr::from_parts(
+        found[0].id.parse().unwrap(),
+        found[0].socket_addrs().into_iter().map(TransportAddr::Ip),
+    );
+
+    let recv_ep = ftrans::net::create_endpoint(&RelayChoice::Lan).await.unwrap();
+
+    // A wrong code must not yield a ticket.
+    assert!(
+        ftrans::receiver::fetch_ticket(&recv_ep, addr.clone(), &wrong_code)
+            .await
+            .is_err(),
+        "the sender must not answer a wrong code"
+    );
+
+    // The right code yields a usable ticket, and the transfer works end to end.
+    let fetched = ftrans::receiver::fetch_ticket(&recv_ep, addr, &code)
+        .await
+        .expect("the right code must yield the ticket");
+    assert_eq!(fetched.hash(), ticket.hash());
+    assert_eq!(fetched.format(), ticket.format());
+
+    let (recv_store, recv_store_dir) = ftrans::receiver::create_store(
+        std::env::temp_dir().as_path(),
+        "ftrans-test-code-recv",
+    )
+    .await
+    .unwrap();
+    let out = TempDir::new().unwrap();
+    let output = out.path().join("out");
+    ftrans::receiver::download(&fetched, &recv_ep, &recv_store, 2, None, false)
+        .await
+        .unwrap();
+    ftrans::receiver::export(&fetched, &output, &recv_store, None, false)
+        .await
+        .unwrap();
+    ftrans::receiver::verify(&fetched, &output, &recv_store, None, false)
+        .await
+        .expect("files fetched via the short code must verify");
+
+    recv_ep.close().await;
+    router.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(&store_dir).await;
+    let _ = tokio::fs::remove_dir_all(&recv_store_dir).await;
+}
+
 // ── verify: full-check behaviour reports every failing file ────────────────
 
 #[tokio::test]

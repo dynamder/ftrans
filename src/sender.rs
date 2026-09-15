@@ -215,6 +215,55 @@ pub enum ServeOutcome {
 /// verification, e.g. `--retry-failed`, without downloading anything).
 pub const ALPN_DONE: &[u8] = b"ftrans-done";
 
+/// ALPN for handing the ticket to a receiver that only knows the session code.
+pub const ALPN_META: &[u8] = b"ftrans-meta";
+
+/// Answers a short-code lookup: a peer that presents the right session code
+/// gets the full ticket. Anyone else gets an empty reply.
+#[derive(Debug)]
+pub struct MetaHandler {
+    pub code: String,
+    pub ticket: String,
+}
+
+/// How long to keep a ticket connection open waiting for the peer's close.
+///
+/// The router drops the connection as soon as `accept` returns, so we must not
+/// return before the receiver has acknowledged the ticket.
+const META_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl ProtocolHandler for MetaHandler {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+            return Ok(());
+        };
+
+        let mut accepted = false;
+        let mut len = [0u8; 1];
+        if recv.read_exact(&mut len).await.is_ok() {
+            let mut buf = vec![0u8; len[0] as usize];
+            if recv.read_exact(&mut buf).await.is_ok() {
+                let requested = String::from_utf8_lossy(&buf);
+                accepted = crate::session::normalize_code(&requested).as_deref()
+                    == Some(self.code.as_str());
+                if accepted {
+                    let _ = send.write_all(self.ticket.as_bytes()).await;
+                }
+            }
+        }
+        let _ = send.finish();
+
+        // Wait for the receiver to close (it does so after reading the ticket,
+        // on success and on failure alike) so the reply is never cut short.
+        if accepted {
+            let _ = tokio::time::timeout(META_CLOSE_WAIT, conn.closed()).await;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) {}
+}
+
 /// Handles the receiver's completion signal: one byte, 0 = success, anything
 /// else = error.
 #[derive(Debug)]
@@ -235,14 +284,15 @@ impl ProtocolHandler for DoneHandler {
     async fn shutdown(&self) {}
 }
 
-/// Build the blobs router (plus the completion-signal handler) and start
-/// listening for connections.
+/// Build the blobs router (plus the completion-signal and short-code handlers)
+/// and start listening for connections.
 ///
 /// Must be called before the ticket is handed out, otherwise the receiver can
 /// connect before the ALPN handlers are registered and the download will fail.
 pub async fn spawn_router(
     endpoint: Endpoint,
     store: FsStore,
+    meta: Option<MetaHandler>,
 ) -> Result<(Router, tokio::sync::mpsc::Receiver<u8>)> {
     let mask = EventMask {
         connected: ConnectMode::Notify,
@@ -251,10 +301,13 @@ pub async fn spawn_router(
     let (events, event_rx) = EventSender::channel(64, mask);
     let blobs = BlobsProtocol::new(&store, Some(events));
     let (done_tx, done_rx) = tokio::sync::mpsc::channel(1);
-    let router = Router::builder(endpoint)
+    let mut builder = Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, blobs)
-        .accept(ALPN_DONE, DoneHandler { tx: done_tx })
-        .spawn();
+        .accept(ALPN_DONE, DoneHandler { tx: done_tx });
+    if let Some(meta) = meta {
+        builder = builder.accept(ALPN_META, meta);
+    }
+    let router = builder.spawn();
 
     // Yield to let router background tasks start listening
     tokio::task::yield_now().await;
@@ -290,7 +343,7 @@ pub async fn wait_for_transfer(done_rx: &mut tokio::sync::mpsc::Receiver<u8>) ->
 /// Serve the blobs until the receiver signals completion or the user presses
 /// Ctrl+C. Prints progress on stdout via the returned [`ServeOutcome`].
 pub async fn serve(endpoint: Endpoint, store: FsStore) -> Result<ServeOutcome> {
-    let (router, mut done_rx) = spawn_router(endpoint, store).await?;
+    let (router, mut done_rx) = spawn_router(endpoint, store, None).await?;
     let outcome = wait_for_transfer(&mut done_rx).await;
     router.shutdown().await?;
     Ok(outcome)

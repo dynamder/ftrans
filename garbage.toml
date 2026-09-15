@@ -1,6 +1,6 @@
 # garbage 清单：ftrans —— 基于 iroh 的局域网大文件迁移工具（旧机发送 / 新机接收）
 name = "ftrans"
-version = "0.4.0"
+version = "0.5.0"
 
 # 在临时副本的源码根目录按序执行构建命令（Windows 用 cmd /C，Linux 用 sh -c）
 build = ["cargo build --release"]

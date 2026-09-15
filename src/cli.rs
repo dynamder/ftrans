@@ -35,8 +35,14 @@ pub enum Command {
     },
     #[command(about = "Receive files (run on new machine)")]
     Receive {
-        #[arg(help = "Ticket string from sender")]
-        ticket: String,
+        #[arg(help = "Session code from the sender (e.g. 4K7M2P), or a full ticket")]
+        ticket: Option<String>,
+        #[arg(
+            long,
+            value_name = "IP",
+            help = "Probe this address directly instead of broadcasting (for networks that filter broadcast traffic)"
+        )]
+        addr: Vec<std::net::IpAddr>,
         #[arg(short, long, default_value = ".", help = "Output directory")]
         output: PathBuf,
         #[arg(

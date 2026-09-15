@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use iroh::address_lookup::memory::MemoryLookup;
-use iroh::{Endpoint, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_blobs::{
     api::blobs::{AddPathOptions, ExportOptions},
     api::downloader::Downloader,
@@ -53,7 +53,7 @@ pub async fn download(
     only: Option<&HashSet<String>>,
     strip_root: bool,
 ) -> Result<()> {
-    register_sender_addr(endpoint, ticket);
+    register_sender_addr(endpoint, ticket.addr().clone());
     let downloader = store.downloader(endpoint);
     let peer_id = ticket.addr().id;
     let parallel = parallel.max(1);
@@ -94,7 +94,7 @@ pub async fn retry_failed(
     strip_root: bool,
     print_retried: bool,
 ) -> Result<()> {
-    register_sender_addr(endpoint, ticket);
+    register_sender_addr(endpoint, ticket.addr().clone());
     let downloader = store.downloader(endpoint);
     let peer_id = ticket.addr().id;
     let abs_output = std::path::absolute(output)?;
@@ -602,10 +602,68 @@ fn print_retried_files(files: &HashSet<String>) {
 
 /// Register the sender's addresses from the ticket so discovery does not
 /// depend on (flaky) mDNS.
-pub(crate) fn register_sender_addr(endpoint: &Endpoint, ticket: &BlobTicket) {
+pub(crate) fn register_sender_addr(endpoint: &Endpoint, addr: EndpointAddr) {
     if let Ok(lookup) = endpoint.address_lookup() {
-        lookup.add(MemoryLookup::from_endpoint_info([ticket.addr().clone()]));
+        lookup.add(MemoryLookup::from_endpoint_info([addr]));
     }
+}
+
+/// How long to allow for the short-code ticket exchange.
+const META_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Fetch the transfer ticket from a sender that was found by its session code.
+///
+/// The code travels inside the encrypted QUIC connection, and the sender only
+/// answers with the ticket when it matches the code it announced on the LAN.
+pub async fn fetch_ticket(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    code: &str,
+) -> Result<BlobTicket> {
+    register_sender_addr(endpoint, addr.clone());
+
+    let conn = tokio::time::timeout(
+        META_TIMEOUT,
+        endpoint.connect(addr, crate::sender::ALPN_META),
+    )
+    .await
+    .context("timed out connecting to the sender")?
+    .context("failed to connect to the sender")?;
+
+    let outcome = exchange_ticket(&conn, code).await;
+
+    // Closing tells the sender the ticket arrived; it waits for exactly this
+    // before dropping the connection.
+    conn.close(0u32.into(), b"ftrans-meta-done");
+    outcome
+}
+
+async fn exchange_ticket(conn: &iroh::endpoint::Connection, code: &str) -> Result<BlobTicket> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .context("failed to open the ticket stream")?;
+
+    let code_bytes = code.as_bytes();
+    anyhow::ensure!(code_bytes.len() <= u8::MAX as usize, "session code too long");
+    send.write_all(&[code_bytes.len() as u8]).await?;
+    send.write_all(code_bytes).await?;
+    let _ = send.finish();
+
+    // iroh's recv stream has its own read_to_end with a size limit.
+    let buf = tokio::time::timeout(META_TIMEOUT, recv.read_to_end(64 * 1024))
+        .await
+        .context("timed out waiting for the ticket")??;
+    anyhow::ensure!(
+        !buf.is_empty(),
+        "the sender rejected the session code (typo, or that session already ended)"
+    );
+
+    let ticket = String::from_utf8(buf).context("the sender sent an invalid ticket")?;
+    ticket
+        .trim()
+        .parse()
+        .context("the sender sent an unparseable ticket")
 }
 
 /// Full receive flow with automatic retry of files that fail verification.
