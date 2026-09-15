@@ -52,18 +52,33 @@ ftrans 默认模式不需要它们，直接在两台机器的内网地址之间�
      两台机器会落在同一个 `192.168.x.x` 网段，再跑 `ftrans` 即可；
    - 或者用网线直连，手动给两端配同网段 IP。
 
+### 本地代理会劫持内网流量（很容易误判成防火墙问题）
+
+若机器上跑着 Clash/V2Ray 之类代理并设置了 `http_proxy`/`https_proxy` 环境变量，而
+`no_proxy` 里只有 `localhost,127.0.0.1`，那么**所有走 HTTP 的工具**（curl、LocalSend、
+下载器等）访问内网地址时都会把请求发给代理，表现为连接超时，看起来就像被防火墙挡了。
+
+排查时务必绕过代理再测一次：
+
+```bash
+curl --noproxy '*' http://<对端内网IP>:<port>/
+```
+
+建议在代理软件里把 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.1`、
+`localhost` 全部加入直连/绕过列表。
+
+ftrans 本身不受影响：它走 QUIC/UDP，不读任何代理环境变量。
+
 传输失败时 ftrans 会打印上述提示；`--relay n0` 模式下等待 relay 最多 10 秒，超时会告警但
 局域网直连仍然可用（不会再像以前那样卡死）。
 
 ## 在另一台机器上获得 ftrans
 
-新机（CachyOS）需要自己编译（校园网可直连 `static.crates.io`，慢的话可换国内镜像
-`rsproxy.cn`/`ustc` 的 crates.io 源）：
-
 ```bash
-cargo build --release --offline   # 依赖已缓存时
-cargo build --release             # 需要拉取依赖时
+git clone https://github.com/dynamder/ftrans.git
+cd ftrans && cargo build --release
 ```
 
-源码本身还没有 ftrans 可用时，先用系统自带手段搬一次（例如 Windows 上
-`python -m http.server`，Linux 上 `curl -O`；U 盘同理）。
+没有外网时也可以从另一台机器直接拷贝源码（例如 Windows 上 `python -m http.server`，
+Linux 上 `curl --noproxy '*' -O`；U 盘同理）。校园网可直连 `static.crates.io`，
+拉依赖慢的话可换 `rsproxy.cn`/`ustc` 的 crates.io 镜像。
