@@ -1,0 +1,18 @@
+# garbage 清单：ftrans —— 基于 iroh 的局域网大文件迁移工具（旧机发送 / 新机接收）
+name = "ftrans"
+version = "0.4.0"
+
+# 在临时副本的源码根目录按序执行构建命令（Windows 用 cmd /C，Linux 用 sh -c）
+build = ["cargo build --release"]
+
+[install]
+# 收进版本目录的构建产物（from 相对源码根；to 可选，默认同名）
+files = [
+  { from = "target/release/ftrans.exe" },  # Windows
+  # { from = "target/release/ftrans" },    # Linux/macOS（无 .exe 后缀）
+]
+
+# 命令入口（文件型）
+[[bins]]
+name = "ftrans"
+target = "ftrans.exe"
